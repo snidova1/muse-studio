@@ -122,7 +122,7 @@ stop_klaw() { # stop_klaw <dir>
 h2_sql() { # h2_sql <dir> <sql>
   ( cd "$1" && java -cp "$TOOLS/h2-2.1.214.jar" org.h2.tools.Shell \
       -url "jdbc:h2:file:./klawprodb;DB_CLOSE_ON_EXIT=FALSE;DB_CLOSE_DELAY=-1;MODE=MySQL;CASE_INSENSITIVE_IDENTIFIERS=TRUE;" \
-      -user kafkauser -password <redacted> -sql "$2" )
+      -user kafkauser -password klaw -sql "$2" )
 }
 
 trap 'stop_klaw "$WORK/instance-a" 2>/dev/null; stop_klaw "$WORK/instance-b" 2>/dev/null' EXIT
