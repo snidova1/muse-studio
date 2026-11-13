@@ -29,6 +29,9 @@ JAR="$(ls "$ROOT"/klaw/core/target/klaw-*.jar 2>/dev/null | head -1)"
 SECRET="$(openssl rand -base64 32)"
 
 mkdir -p "$WORK"
+# Klaw's export service writes straight to $WORK/export-a/... without
+# creating the directory (FileNotFoundException killed run 43413269969).
+mkdir -p "$WORK/export-a"
 exec > >(tee -a "$LOG") 2>&1
 
 PASS=0
