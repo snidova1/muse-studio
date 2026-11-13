@@ -28,6 +28,12 @@ BASE="http://localhost:9097"
 JAR="$(ls "$ROOT"/klaw/core/target/klaw-*.jar 2>/dev/null | head -1)"
 SECRET="$(openssl rand -base64 32)"
 
+# Safety caps for CI (the stop/lock waits below default to indefinite): never hang
+# the runner forever if a shutdown or the H2 lock stalls. 300s then SIGKILL for
+# shutdown; 300s of lock retries for the H2 read.
+KLAW_STOP_TIMEOUT_SECONDS="${KLAW_STOP_TIMEOUT_SECONDS:-300}"
+H2_LOCK_WAIT_SECONDS="${H2_LOCK_WAIT_SECONDS:-300}"
+
 mkdir -p "$WORK"
 # Klaw's export service writes straight to $WORK/export-a/... without
 # creating the directory (FileNotFoundException killed run 43413269969).
@@ -98,32 +104,210 @@ login() {
   note "login($user): /getAuth HTTP $LOGIN_CODE body: $(echo "$LOGIN_BODY" | head -c 300)"
 }
 
-start_klaw() { # start_klaw <dir> <logfile> <env assignments...>
-  local dir="$1" log="$2"
+# Linux /proc identity: prints "<state> <process-start-time>".
+_klaw_process_identity() {
+  local stat rest
+  local -a fields
+
+  [[ "$1" =~ ^[1-9][0-9]*$ ]] || return 1
+  { IFS= read -r stat < "/proc/$1/stat"; } 2>/dev/null || return 1
+
+  # Strip PID and parenthesized comm; comm can contain spaces and ')'.
+  rest="${stat##*) }"
+  read -r -a fields <<< "$rest"
+  ((${#fields[@]} >= 20)) || return 1
+
+  printf '%s %s\n' "${fields[0]}" "${fields[19]}"
+}
+
+# True only while the recorded process still exists and has not exited.
+_klaw_process_alive() {
+  local state birth
+  read -r state birth < <(_klaw_process_identity "$1") || return 1
+  [[ "$birth" == "$2" && "$state" != Z && "$state" != X ]]
+}
+
+start_klaw() ( # start_klaw <dir> <logfile> <env assignments...>
+  local dir log jar pid state birth old_pid old_birth tmp
+
+  dir="$1"
+  log="$2"
   shift 2
-  mkdir -p "$dir"
-  ( cd "$dir" && env "$@" nohup java -jar "$JAR" > "$log" 2>&1 & echo $! > "$dir/klaw.pid" )
-  sleep 2
-  note "started Klaw in $dir (pid $(cat "$dir/klaw.pid" 2>/dev/null || echo '?'))"
-}
 
-stop_klaw() { # stop_klaw <dir>
-  local pid=""
-  pid="$(cat "$1/klaw.pid" 2>/dev/null || echo "")"
-  if [ -n "$pid" ]; then
-    kill "$pid" 2>/dev/null || true
-    local i=0
-    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 30 ]; do sleep 2; i=$((i + 1)); done
-    kill -9 "$pid" 2>/dev/null || true
-    note "stopped Klaw in $1"
+  mkdir -p -- "$dir" || return 1
+  dir="$(realpath -e -- "$dir")" || return 1
+  log="$(realpath -m -- "$log")" || return 1
+  jar="$(realpath -e -- "$JAR")" || return 1
+
+  exec 9>"$dir/.klaw-control.lock" || return 1
+  flock -x 9 || return 1
+
+  if [[ -e "$dir/klaw.pid" ]]; then
+    if ! read -r old_pid old_birth < "$dir/klaw.pid" ||
+       [[ ! "$old_pid" =~ ^[1-9][0-9]*$ ||
+          ! "$old_birth" =~ ^[0-9]+$ ]]; then
+      printf 'Invalid PID file: %s\n' "$dir/klaw.pid" >&2
+      return 1
+    fi
+    if _klaw_process_alive "$old_pid" "$old_birth"; then
+      printf 'Klaw is already running in %s (PID %s)\n' \
+        "$dir" "$old_pid" >&2
+      return 1
+    fi
+    rm -f -- "$dir/klaw.pid" || return 1
   fi
-}
 
-h2_sql() { # h2_sql <dir> <sql>
-  ( cd "$1" && java -cp "$TOOLS/h2-2.1.214.jar" org.h2.tools.Shell \
-      -url "jdbc:h2:file:./klawprodb;DB_CLOSE_ON_EXIT=FALSE;DB_CLOSE_DELAY=-1;MODE=MySQL;CASE_INSENSITIVE_IDENTIFIERS=TRUE;" \
-      -user kafkauser -password klaw -sql "$2" )
-}
+  # Open the log in the parent so redirection errors are detected.
+  exec 8>"$log" || return 1
+  (
+    exec 9>&-                  # Java must not retain the control lock.
+    cd -- "$dir" || exit 1
+    exec env "$@" nohup java -jar "$jar"
+  ) </dev/null >&8 2>&1 &
+  pid=$!
+  exec 8>&-
+
+  if ! read -r state birth < <(_klaw_process_identity "$pid") ||
+     [[ "$state" == Z || "$state" == X ]]; then
+    wait "$pid" 2>/dev/null || true
+    printf 'Klaw exited during launch; see %s\n' "$log" >&2
+    return 1
+  fi
+
+  tmp="$dir/klaw.pid.tmp.$BASHPID"
+  if ! printf '%s %s\n' "$pid" "$birth" > "$tmp" ||
+     ! mv -f -- "$tmp" "$dir/klaw.pid"; then
+    rm -f -- "$tmp"
+    kill -TERM "$pid" 2>/dev/null || true
+    while _klaw_process_alive "$pid" "$birth"; do sleep 1; done
+    wait "$pid" 2>/dev/null || true
+    return 1
+  fi
+
+  # The caller must still perform its application health check.
+)
+
+stop_klaw() ( # stop_klaw <dir>
+  local dir pid birth timeout started forced=0
+
+  dir="$(realpath -e -- "$1")" || return 1
+  timeout="${KLAW_STOP_TIMEOUT_SECONDS:-0}"
+  [[ "$timeout" =~ ^(0|[1-9][0-9]*)$ ]] || {
+    printf 'Invalid KLAW_STOP_TIMEOUT_SECONDS: %s\n' "$timeout" >&2
+    return 1
+  }
+
+  exec 9>"$dir/.klaw-control.lock" || return 1
+  flock -x 9 || return 1
+
+  [[ -e "$dir/klaw.pid" ]] || return 0
+  if ! read -r pid birth < "$dir/klaw.pid" ||
+     [[ ! "$pid" =~ ^[1-9][0-9]*$ || ! "$birth" =~ ^[0-9]+$ ]]; then
+    printf 'Invalid PID file: %s\n' "$dir/klaw.pid" >&2
+    return 1
+  fi
+
+  if _klaw_process_alive "$pid" "$birth"; then
+    kill -TERM "$pid" 2>/dev/null || {
+      if _klaw_process_alive "$pid" "$birth"; then
+        printf 'Cannot terminate Klaw PID %s\n' "$pid" >&2
+        return 1
+      fi
+    }
+
+    started=$SECONDS
+    while _klaw_process_alive "$pid" "$birth"; do
+      if ((timeout > 0 && forced == 0 &&
+           SECONDS - started >= timeout)); then
+        printf 'Klaw shutdown timed out; sending SIGKILL to %s\n' \
+          "$pid" >&2
+        kill -KILL "$pid" 2>/dev/null || {
+          if _klaw_process_alive "$pid" "$birth"; then
+            printf 'Cannot kill Klaw PID %s\n' "$pid" >&2
+            return 1
+          fi
+        }
+        forced=1
+      fi
+      sleep 1
+    done
+  fi
+
+  # May not be our child; zombie detection above handles that case.
+  wait "$pid" 2>/dev/null || true
+  rm -f -- "$dir/klaw.pid" || return 1
+  printf 'Stopped Klaw in %s\n' "$dir"
+)
+
+h2_sql() ( # h2_sql <dir> <sql>
+  local dir sql jar pid birth output rc started timeout announced=0
+
+  dir="$(realpath -e -- "$1")" || return 1
+  sql="$2"
+  jar="$(realpath -e -- "$TOOLS/h2-2.1.214.jar")" || return 1
+  timeout="${H2_LOCK_WAIT_SECONDS:-0}"
+  [[ "$timeout" =~ ^(0|[1-9][0-9]*)$ ]] || {
+    printf 'Invalid H2_LOCK_WAIT_SECONDS: %s\n' "$timeout" >&2
+    return 1
+  }
+
+  exec 9>"$dir/.klaw-control.lock" || return 1
+  flock -x 9 || return 1
+
+  if [[ -e "$dir/klaw.pid" ]]; then
+    if ! read -r pid birth < "$dir/klaw.pid" ||
+       [[ ! "$pid" =~ ^[1-9][0-9]*$ || ! "$birth" =~ ^[0-9]+$ ]]; then
+      printf 'Invalid PID file: %s\n' "$dir/klaw.pid" >&2
+      return 1
+    fi
+    if _klaw_process_alive "$pid" "$birth"; then
+      printf 'Stop Klaw before reading its database: %s\n' "$dir" >&2
+      return 1
+    fi
+  fi
+
+  output="$(mktemp)" || return 1
+  trap 'rm -f -- "$output"' EXIT
+  cd -- "$dir" || return 1
+  started=$SECONDS
+
+  while :; do
+    if java -cp "$jar" org.h2.tools.Shell \
+      -url 'jdbc:h2:file:./klawprodb;IFEXISTS=TRUE;MODE=MySQL;CASE_INSENSITIVE_IDENTIFIERS=TRUE;' \
+      -user kafkauser -password klaw -sql "$sql" \
+      > "$output" 2>&1; then
+      rc=0
+    else
+      rc=$?
+    fi
+
+    # Retry connection-open lock failures, not arbitrary SQL errors.
+    if grep -Eq \
+      'JdbcSQLNonTransientConnectionException: Database may be already in use|MVStoreException: The file is locked' \
+      "$output"; then
+      if ((timeout > 0 && SECONDS - started >= timeout)); then
+        cat "$output" >&2
+        return 1
+      fi
+      if ((announced == 0)); then
+        printf 'Waiting for H2 database lock in %s\n' "$dir" >&2
+        announced=1
+      fi
+      sleep 1
+      continue
+    fi
+
+    # H2 Shell can print SQL errors while returning exit status zero.
+    if ((rc != 0)) ||
+       grep -Eq '^[[:space:]]*Error:|^Exception in thread' "$output"; then
+      cat "$output" >&2
+      return 1
+    fi
+
+    cat "$output"
+    return 0
+  done
+)
 
 trap 'stop_klaw "$WORK/instance-a" 2>/dev/null; stop_klaw "$WORK/instance-b" 2>/dev/null' EXIT
 
