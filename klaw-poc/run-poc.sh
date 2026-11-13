@@ -44,6 +44,7 @@ PASS=0
 FAIL=0
 C1_FAIL=0
 C2_FAIL=0
+C2R_FAIL=0
 
 note() { echo "[$(date -u +%H:%M:%S)] $*"; }
 
@@ -58,6 +59,7 @@ check() {
     FAIL=$((FAIL + 1))
     [ "$group" = "C1" ] && C1_FAIL=$((C1_FAIL + 1))
     [ "$group" = "C2" ] && C2_FAIL=$((C2_FAIL + 1))
+    [ "$group" = "C2R" ] && C2R_FAIL=$((C2R_FAIL + 1))
   fi
 }
 
@@ -463,6 +465,29 @@ login william "welcome"
 check C2 "negative control: william/welcome (old pwd) rejected on B" "302" "$LOGIN_CODE"
 login admin2 "BAdminPass123"
 check C2 "control: admin2/BAdminPass123 (B's own seeded admin) still works" "200" "$LOGIN_CODE"
+
+# restart test: the in-memory auth manager is populated at startup; users imported
+# after boot may only become log-in-able after a restart. Retry after restart.
+note "=== C2 RESTART TEST: restart B, retry logins ==="
+stop_klaw "$WORK/instance-b"
+start_klaw "$WORK/instance-b" "$WORK/instance-b.log" \
+  KLAW_SUPERADMIN_DEFAULT_USERNAME=admin2 \
+  KLAW_SUPERADMIN_DEFAULT_PASSWORD=BAdminPass123 \
+  KLAW_CLUSTERAPI_ACCESS_BASE64_SECRET="$SECRET" \
+  KLAW_IMPORT_ENABLE=true \
+  KLAW_IMPORT_ADMINCONFIG_ENABLE=true \
+  KLAW_IMPORT_ADMINCONFIG_FILE_PATH="$EXPORT_FILE"
+if ! wait_healthy 240; then
+  note "FATAL: instance B did not restart"
+  tail -60 "$WORK/instance-b.log"
+  exit 1
+fi
+login superadmin "WelcomeToKlaw!!"
+check C2R "after restart: live login superadmin/WelcomeToKlaw!! on B" "200" "$LOGIN_CODE"
+login william "WelcomeToKlaw!!"
+check C2R "after restart: live login william/WelcomeToKlaw!! on B" "200" "$LOGIN_CODE"
+login admin2 "BAdminPass123"
+check C2R "after restart: control admin2/BAdminPass123 still works" "200" "$LOGIN_CODE"
 stop_klaw "$WORK/instance-b"
 
 # diagnostic: did the import actually insert the users, and with what pwd?
@@ -499,11 +524,19 @@ done
     echo "Import of A's exported admin_config into fresh instance B assigned"
     echo "WelcomeToKlaw!! to every imported user incl. the superadmin-role"
     echo "account; live logins with it succeeded, old passwords rejected."
+  elif [ "$C2R_FAIL" -eq 0 ]; then
+    echo "## CANDIDATE 2 — CONFIRMED (after restart)"
+    echo "Import of A's exported admin_config into fresh instance B assigned"
+    echo "WelcomeToKlaw!! to every imported user incl. the superadmin-role"
+    echo "account. Live logins with it failed immediately after import, but"
+    echo "succeeded after restarting B: the in-memory auth manager is populated"
+    echo "at startup, so users imported after boot only become log-in-able after"
+    echo "a restart. Old passwords were rejected in both cases."
   else
-    echo "## CANDIDATE 2 — NOT CONFIRMED ($C2_FAIL check(s) failed)"
-    echo "The live logins with WelcomeToKlaw!! on B did NOT all succeed — see"
-    echo "poc-results.log and the C2 diagnostic (export pwd decryption + B user"
-    echo "table) for what was actually imported and stored."
+    echo "## CANDIDATE 2 — NOT CONFIRMED ($C2_FAIL check(s) failed, $C2R_FAIL restart check(s) failed)"
+    echo "The live logins with WelcomeToKlaw!! on B did NOT succeed, even after a"
+    echo "restart — see poc-results.log and the C2 diagnostic (export pwd"
+    echo "decryption + B user table) for what was actually imported and stored."
   fi
   echo "Precision: a same-username account pre-seeded on B is NOT overwritten"
   echo "(insertIntoUsers refuses duplicates) — B used a different seeded admin"
@@ -513,5 +546,5 @@ done
 } > "$SUMMARY"
 cat "$SUMMARY"
 
-note "=== PoC done: PASS=$PASS FAIL=$FAIL C1_FAIL=$C1_FAIL C2_FAIL=$C2_FAIL ==="
+note "=== PoC done: PASS=$PASS FAIL=$FAIL C1_FAIL=$C1_FAIL C2_FAIL=$C2_FAIL C2R_FAIL=$C2R_FAIL ==="
 [ "$FAIL" -eq 0 ]
